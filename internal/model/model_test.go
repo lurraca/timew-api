@@ -149,6 +149,18 @@ func TestWeeklyFormat(t *testing.T) {
 	}
 }
 
+func TestRepeatedNoteShownOnce(t *testing.T) {
+	note := "Backfilled from QuickBooks: 8 h, times reconstructed (start 11:00, 1 h break)"
+	r := WeeklyReport([]Interval{
+		iv("20261019T100000Z", "20261019T140000Z", note), // IST: 11:00–15:00
+		iv("20261019T150000Z", "20261019T190000Z", note),
+	}, day("2026-10-19"), "")
+	want := "Mon 19 Oct, 11:00–15:00 and 16:00–20:00 (8:00): " + note + "."
+	if !strings.Contains(r.Text, want) || !strings.Contains(r.Text, "IST, UTC+1") {
+		t.Fatal(r.Text)
+	}
+}
+
 func TestWeeklyReportEdges(t *testing.T) {
 	if r := WeeklyReport(nil, day("2026-10-26"), ""); r.Text != "" {
 		t.Fatal(r.Text)

@@ -6,6 +6,7 @@ package model
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -274,7 +275,9 @@ func WeeklyReport(ivs []Interval, monday time.Time, project string) Report {
 		for _, iv := range byDay[d] {
 			secs += Duration(iv, time.Time{})
 			ranges = append(ranges, mustTimew(iv.Start).In(Dublin).Format("15:04")+"–"+mustTimew(iv.End).In(Dublin).Format("15:04"))
-			if n := strings.TrimRight(strings.TrimSpace(iv.Annotation), "."); n != "" {
+			// The same note on two entries of a day (e.g. both halves around
+			// a break) is shown once.
+			if n := strings.TrimRight(strings.TrimSpace(iv.Annotation), "."); n != "" && !slices.Contains(notes, n) {
 				notes = append(notes, n)
 			}
 		}

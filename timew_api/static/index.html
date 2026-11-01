@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>timew</title>
+<style>
+  :root { --bg:#fbfaf8; --fg:#1d1d1f; --muted:#6b6b70; --line:#e3e1dc; --card:#fff; --accent:#2f6f4f; --on-accent:#fff; --warn:#a33a2a; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#151517; --fg:#ececee; --muted:#9a9aa2; --line:#2c2c30; --card:#1d1d20; --accent:#6fbf8f; --on-accent:#10261a; --warn:#e07a68; } }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 640px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 4px 0 12px; display:flex; justify-content:space-between; align-items:baseline; }
+  h1 small { font-weight: 400; color: var(--muted); font-size: 13px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+  .now { font-size: 22px; font-variant-numeric: tabular-nums; }
+  .now .tag { color: var(--accent); }
+  .muted { color: var(--muted); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:8px; }
+  input { font: inherit; color: inherit; background: var(--bg); border:1px solid var(--line); border-radius:7px; padding:7px 9px; min-width:0; }
+  input.grow { flex: 1 1 160px; } input.hm { width: 84px; } input.day { width: 140px; }
+  button { font: inherit; border:1px solid var(--line); background: var(--bg); color: var(--fg); border-radius:7px; padding:7px 12px; cursor:pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+  button.danger { color: var(--warn); }
+  button:disabled { opacity: .5; cursor: default; }
+  .chip { font-size: 13px; padding: 3px 9px; border-radius: 99px; }
+  ul { list-style: none; padding: 0; margin: 0; }
+  li { display:flex; gap:8px; align-items:baseline; padding:6px 0; border-top:1px solid var(--line); }
+  li:first-child { border-top: 0; }
+  li .t { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  li .what { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .totals { display:flex; gap:16px; font-variant-numeric: tabular-nums; }
+  pre { white-space: pre-wrap; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--bg); border:1px solid var(--line); border-radius:7px; padding:10px; margin: 8px 0 0; }
+  #msg { min-height: 20px; font-size: 14px; }
+  #msg.err { color: var(--warn); }
+</style>
+</head>
+<body>
+<main>
+  <h1>timew <small id="clock"></small></h1>
+  <div id="msg"></div>
+
+  <section>
+    <div class="now" id="now">…</div>
+    <div class="row" id="runControls"></div>
+    <div class="row" id="noteRow" hidden>
+      <input class="grow" id="note" placeholder="Note on the running entry (replaces it)">
+      <button id="saveNote">Save note</button>
+    </div>
+  </section>
+
+  <section id="startBox">
+    <h2>Start</h2>
+    <div class="row">
+      <input class="grow" id="tags" placeholder="tags, e.g. client.project">
+      <input class="hm" id="at" placeholder="HH:MM" title="Start time, if you forgot to start">
+      <button class="primary" id="start">Start</button>
+    </div>
+    <div class="row" id="chips"></div>
+  </section>
+
+  <section>
+    <h2>Today</h2>
+    <ul id="today"></ul>
+    <div class="row totals" id="totals"></div>
+  </section>
+
+  <section>
+    <h2>Add past block</h2>
+    <div class="row">
+      <input class="day" id="pDate" type="date">
+      <input class="hm" id="pFrom" placeholder="from">
+      <input class="hm" id="pTo" placeholder="to">
+    </div>
+    <div class="row">
+      <input class="grow" id="pTags" placeholder="tags">
+      <input class="grow" id="pNote" placeholder="note (optional)">
+      <button id="pAdd">Add</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Week report</h2>
+    <div class="row">
+      <button id="wPrev">‹</button>
+      <span id="wLabel" class="muted"></span>
+      <button id="wNext">›</button>
+      <span style="flex:1"></span>
+      <button id="wCopy">Copy</button>
+    </div>
+    <pre id="report">…</pre>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let state = null, tickBase = 0, tickAt = 0, armed = null, retry = null, week = null;
+
+const hm = (s) => { s = Math.max(0, Math.floor(s)); return `${Math.floor(s / 3600)}:${String(Math.floor(s % 3600 / 60)).padStart(2, "0")}`; };
+const parseTimew = (s) => new Date(s.replace(/^(\d{4})(\d\d)(\d\d)T(\d\d)(\d\d)(\d\d)Z$/, "$1-$2-$3T$4:$5:$6Z"));
+const clock = (s) => parseTimew(s).toLocaleTimeString("en-IE", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Dublin" });
+const label = (tags) => tags.map((t) => /\s/.test(t) ? `"${t}"` : t).join(" ");
+// Double quotes keep a tag with spaces together, as in a shell.
+const splitTags = (text) => [...text.matchAll(/"([^"]*)"|(\S+)/g)].map((m) => m[1] ?? m[2]).filter(Boolean);
+
+function say(text, err = false) { const m = $("msg"); m.textContent = text || ""; m.className = err ? "err" : ""; }
+
+async function api(method, path, body) {
+  const res = await fetch(path, {
+    method, credentials: "same-origin",
+    headers: body ? { "Content-Type": "application/json" } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+  if (!res.ok) { const e = new Error(data.error || `HTTP ${res.status}`); e.overlap = !!data.overlap; throw e; }
+  return data;
+}
+
+async function act(method, path, body, done) {
+  document.querySelectorAll("button").forEach((b) => b.disabled = true);
+  try {
+    render(await api(method, path, body));
+    retry = null; say(done || "");
+    loadReport();
+  } catch (e) {
+    say(e.message, true);
+    // Overlaps have one standard fix: trim the neighbour with :adjust.
+    if (e.overlap && path === "/api/track" && !body.adjust) {
+      retry = () => act(method, path, { ...body, adjust: true }, done);
+      say(e.message + " — ", true);
+      const b = document.createElement("button"); b.textContent = "Retry and trim the other entry"; b.onclick = retry;
+      $("msg").append(b);
+    }
+  } finally {
+    document.querySelectorAll("button").forEach((b) => b.disabled = false);
+  }
+}
+
+function render(s) {
+  state = s;
+  const r = s.running;
+  tickBase = r ? r.seconds : 0; tickAt = Date.now();
+  $("runControls").innerHTML = "";
+  if (r) {
+    const stop = document.createElement("button"); stop.className = "primary"; stop.textContent = "Stop";
+    stop.onclick = () => act("POST", "/api/stop", {}, "Stopped");
+    $("runControls").append(stop);
+    if (document.activeElement !== $("note")) $("note").value = r.annotation || "";
+  } else {
+    const resume = document.createElement("button"); resume.textContent = "Resume last";
+    resume.onclick = () => act("POST", "/api/continue", {}, "Resumed");
+    $("runControls").append(resume);
+  }
+  $("noteRow").hidden = !r;
+  $("startBox").hidden = !!r;
+
+  $("chips").innerHTML = "";
+  for (const tags of s.recent_tags) {
+    const c = document.createElement("button"); c.className = "chip"; c.textContent = label(tags);
+    c.onclick = () => act("POST", "/api/start", { tags }, "Started");
+    $("chips").append(c);
+  }
+
+  $("today").innerHTML = "";
+  if (!s.today.length) $("today").innerHTML = '<li class="muted">Nothing tracked today.</li>';
+  for (const iv of s.today) {
+    const li = document.createElement("li");
+    const end = iv.end ? clock(iv.end) : "now";
+    const secs = iv.end ? (parseTimew(iv.end) - parseTimew(iv.start)) / 1000 : tickBase;
+    li.innerHTML = `<span class="t">${clock(iv.start)}–${end}</span><span class="t muted">${hm(secs)}</span><span class="what"></span>`;
+    li.querySelector(".what").textContent = label(iv.tags) + (iv.annotation ? ` — ${iv.annotation}` : "");
+    const del = document.createElement("button"); del.className = "chip danger";
+    del.textContent = armed === iv.start ? "Confirm" : "Delete";
+    del.onclick = () => {
+      if (armed !== iv.start) { armed = iv.start; render(state); return; }
+      armed = null; act("DELETE", `/api/intervals/${encodeURIComponent(iv.start)}`, null, "Deleted");
+    };
+    li.append(del);
+    $("today").append(li);
+  }
+  tick();
+}
+
+function tick() {
+  if (!state) return;
+  const live = state.running ? tickBase + (Date.now() - tickAt) / 1000 : 0;
+  const t = state.totals, extra = state.running ? live - tickBase : 0;
+  $("now").innerHTML = state.running
+    ? `<span class="tag"></span> ${hm(live)}`
+    : `<span class="muted">Stopped</span>`;
+  if (state.running) $("now").querySelector(".tag").textContent = label(state.running.tags);
+  $("totals").innerHTML = `<span>Today <b>${hm(t.today + extra)}</b></span><span>Week <b>${hm(t.week + extra)}</b></span><span>Month <b>${hm(t.month + extra)}</b></span>`;
+  $("clock").textContent = new Date().toLocaleString("en-IE", { weekday: "short", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Dublin" });
+}
+
+const isoDay = (d) => d.toLocaleDateString("en-CA", { timeZone: "Europe/Dublin" });
+
+async function loadReport() {
+  week = week || isoDay(new Date());
+  try {
+    const r = await api("GET", `/api/report?date=${week}`);
+    week = r.week;
+    $("wLabel").textContent = `week of ${r.week}` + (r.tracked ? ` · ${hm(r.tracked)} tracked · ${r.billed_hours} h billable` : "");
+    $("report").textContent = r.text || "Nothing tracked that week.";
+  } catch (e) { $("report").textContent = e.message; }
+}
+
+function shiftWeek(days) { const d = new Date(week + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() + days); week = d.toISOString().slice(0, 10); loadReport(); }
+
+$("start").onclick = () => {
+  const tags = splitTags($("tags").value), at = $("at").value.trim();
+  act("POST", "/api/start", at ? { tags, at } : { tags }, "Started").then(() => { $("tags").value = ""; $("at").value = ""; });
+};
+$("saveNote").onclick = () => state?.running && act("POST", "/api/annotate", { start: state.running.start, text: $("note").value }, "Note saved");
+$("pAdd").onclick = () => act("POST", "/api/track", {
+  date: $("pDate").value, from: $("pFrom").value, to: $("pTo").value,
+  tags: splitTags($("pTags").value), note: $("pNote").value,
+}, "Added").then(() => { if (!$("msg").classList.contains("err")) ["pFrom", "pTo", "pNote"].forEach((id) => $(id).value = ""); });
+$("wPrev").onclick = () => shiftWeek(-7);
+$("wNext").onclick = () => shiftWeek(7);
+$("wCopy").onclick = async () => {
+  try { await navigator.clipboard.writeText($("report").textContent); say("Report copied"); }
+  catch { say("Copy failed — select the text and copy it by hand", true); }
+};
+
+async function refresh() { try { render(await api("GET", "/api/status")); } catch (e) { say(e.message, true); } }
+$("pDate").value = isoDay(new Date());
+refresh(); loadReport();
+setInterval(tick, 1000);
+setInterval(refresh, 30000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+</script>
+</body>
+</html>

@@ -10,21 +10,25 @@
     in
     {
       packages = forAll (pkgs: {
-        default = pkgs.python3Packages.buildPythonApplication {
+        default = pkgs.buildGoModule {
           pname = "timew-api";
           version = "0.1.0";
-          pyproject = true;
           src = self;
-          build-system = [ pkgs.python3Packages.setuptools ];
-          dependencies = [ pkgs.python3Packages.cryptography ];
+          vendorHash = null; # standard library only
+          env.CGO_ENABLED = 0;
+          ldflags = [ "-s" "-w" ];
           # The server shells out to `timew`; the end-to-end tests need it too.
-          makeWrapperArgs = [ "--prefix" "PATH" ":" "${pkgs.lib.makeBinPath [ pkgs.timewarrior ]}" ];
-          nativeCheckInputs = [ pkgs.timewarrior pkgs.tzdata ];
-          checkPhase = ''
-            runHook preCheck
-            HOME=$TMPDIR TZ=Europe/Dublin python -m unittest discover -s tests -t .
-            runHook postCheck
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+          nativeCheckInputs = [ pkgs.timewarrior ];
+          # timew is always run in Europe/Dublin (internal/timew), and needs
+          # the zone files to find it; the sandbox has none.
+          preCheck = "export TZDIR=${pkgs.tzdata}/share/zoneinfo";
+          postInstall = ''
+            wrapProgram $out/bin/timew-api \
+              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.timewarrior ]} \
+              --set-default TZDIR ${pkgs.tzdata}/share/zoneinfo
           '';
+          meta.mainProgram = "timew-api";
         };
       });
 

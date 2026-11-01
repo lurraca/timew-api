@@ -4,6 +4,8 @@ A small HTTP API and web page for [timewarrior](https://timewarrior.net). It run
 `timew` and nothing else: every action is a normal timew command, so timew's own
 checks still apply and `timew undo` still works.
 
+Go, standard library only, one static binary. The page is embedded in it.
+
 ```
  browser (any machine) ─┐   HTTPS          ┌────────────┐  argv   ┌──────┐
  scripts, a tray app ───┼─▶ Cloudflare ───▶│ timew-api  │───────▶│ timew │
@@ -53,22 +55,33 @@ form at the page.
 ## Run
 
 ```bash
+go build ./cmd/timew-api
+
 # development, no auth (refused on anything but loopback)
-python3 -m timew_api.server --no-auth --port 8097 --db /tmp/timew-test
+./timew-api --no-auth --port 8097 --db /tmp/timew-test
 
 # real
 TIMEW_API_CF_TEAM_DOMAIN=myteam.cloudflareaccess.com \
 TIMEW_API_CF_AUD=<aud tag> \
 TIMEW_API_PROJECT="Client – Project" \
-python3 -m timew_api.server --port 8097 --db ~/.local/share/timewarrior
+./timew-api --port 8097 --db ~/.local/share/timewarrior
 ```
+
+| Path | |
+|---|---|
+| `cmd/timew-api` | flags and startup |
+| `internal/model` | pure logic: parsing, totals, the weekly report |
+| `internal/timew` | runs `timew`, one command at a time |
+| `internal/auth` | Cloudflare Access token check (from splice) |
+| `internal/server` | HTTP handlers and the embedded page |
 
 On NixOS, import `nixosModules.default` and set `services.timew-api.{enable,dataDir,environmentFile}`.
 
 ## Tests
 
 ```bash
-TZ=Europe/Dublin python3 -m unittest discover -s tests -t .
+go test ./...
 ```
 
-The end-to-end tests run real `timew` against a throwaway database.
+The server tests run real `timew` against a throwaway database (skipped if
+timew isn't installed). `nix build` runs them too.

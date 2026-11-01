@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -110,6 +111,23 @@ func TestPageAndHealth(t *testing.T) {
 	}
 	if code, _ := e.do("GET", "/nope", nil); code != 404 {
 		t.Fatal(code)
+	}
+}
+
+func TestManifestAndIcon(t *testing.T) {
+	e := setup(t, nil)
+	code, m := e.json("GET", "/manifest.webmanifest", nil)
+	if code != 200 || m["display"] != "standalone" || len(m["icons"].([]any)) != 3 {
+		t.Fatal(code, m)
+	}
+	code, off := e.do("GET", "/icon.png?size=64", nil)
+	_, on := e.do("GET", "/icon.png?size=64&on=1", nil)
+	if code != 200 || !bytes.HasPrefix(off, []byte("\x89PNG")) || bytes.Equal(on, off) {
+		t.Fatal("want two different PNGs", code)
+	}
+	cfg, err := png.DecodeConfig(bytes.NewReader(off))
+	if err != nil || cfg.Width != 64 {
+		t.Fatal(cfg, err)
 	}
 }
 
@@ -273,7 +291,7 @@ func (fakeIdentity) Who(r *http.Request) (string, error) {
 
 func TestNoIdentityNoData(t *testing.T) {
 	e := setup(t, fakeIdentity{})
-	for _, path := range []string{"/", "/api/status", "/api/report"} {
+	for _, path := range []string{"/", "/api/status", "/api/report", "/manifest.webmanifest", "/icon.png"} {
 		if code, _ := e.do("GET", path, nil); code != 401 {
 			t.Errorf("%s: %d", path, code)
 		}

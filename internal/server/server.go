@@ -48,6 +48,8 @@ func (s *Server) Handler() http.Handler {
 		_, err := w.Write(page)
 		return err
 	}))
+	mux.Handle("GET /manifest.webmanifest", s.authed(s.manifest))
+	mux.Handle("GET /icon.png", s.authed(s.icon))
 	mux.Handle("GET /api/status", s.api(s.status))
 	mux.Handle("GET /api/intervals", s.api(s.intervals))
 	mux.Handle("GET /api/report", s.api(s.report))

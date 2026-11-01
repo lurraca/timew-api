@@ -3,6 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="application-name" content="timew">
+<meta name="theme-color" content="#2f6f4f">
+<!-- Behind Cloudflare Access, so the manifest must be fetched with the login cookie. -->
+<link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
+<link rel="icon" id="favicon" href="/icon.png?size=64">
 <title>timew</title>
 <style>
   :root { --bg:#fbfaf8; --fg:#1d1d1f; --muted:#6b6b70; --line:#e3e1dc; --card:#fff; --accent:#2f6f4f; --on-accent:#fff; --warn:#a33a2a; }
@@ -21,11 +26,12 @@
   .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:8px; }
   input { font: inherit; color: inherit; background: var(--bg); border:1px solid var(--line); border-radius:7px; padding:7px 9px; min-width:0; }
   input.grow { flex: 1 1 160px; } input.hm { width: 84px; } input.day { width: 140px; }
+  input.dirty { border-color: var(--accent); }
   button { font: inherit; border:1px solid var(--line); background: var(--bg); color: var(--fg); border-radius:7px; padding:7px 12px; cursor:pointer; }
   button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
   button.danger { color: var(--warn); }
-  button:disabled { opacity: .5; cursor: default; }
   .chip { font-size: 13px; padding: 3px 9px; border-radius: 99px; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 4px; min-height: 16px; }
   ul { list-style: none; padding: 0; margin: 0; }
   li { display:flex; gap:8px; align-items:baseline; padding:6px 0; border-top:1px solid var(--line); }
   li:first-child { border-top: 0; }
@@ -45,9 +51,12 @@
   <section>
     <div class="now" id="now">…</div>
     <div class="row" id="runControls"></div>
-    <div class="row" id="noteRow" hidden>
-      <input class="grow" id="note" placeholder="Note on the running entry (replaces it)">
-      <button id="saveNote">Save note</button>
+    <div id="noteBox" hidden>
+      <div class="row">
+        <input class="grow" id="note" placeholder="Note on the running entry">
+        <button id="saveNote">Save note</button>
+      </div>
+      <div class="hint" id="noteHint"></div>
     </div>
   </section>
 
@@ -96,65 +105,119 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-let state = null, tickBase = 0, tickAt = 0, armed = null, retry = null, week = null;
+let state = null, tickBase = 0, tickAt = 0, armed = null, week = null;
 
 const hm = (s) => { s = Math.max(0, Math.floor(s)); return `${Math.floor(s / 3600)}:${String(Math.floor(s % 3600 / 60)).padStart(2, "0")}`; };
 const parseTimew = (s) => new Date(s.replace(/^(\d{4})(\d\d)(\d\d)T(\d\d)(\d\d)(\d\d)Z$/, "$1-$2-$3T$4:$5:$6Z"));
 const clock = (s) => parseTimew(s).toLocaleTimeString("en-IE", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Dublin" });
 const label = (tags) => tags.map((t) => /\s/.test(t) ? `"${t}"` : t).join(" ");
+const short = (tags) => (tags[0] || "").split(".").pop();
 // Double quotes keep a tag with spaces together, as in a shell.
 const splitTags = (text) => [...text.matchAll(/"([^"]*)"|(\S+)/g)].map((m) => m[1] ?? m[2]).filter(Boolean);
+const isoDay = (d) => d.toLocaleDateString("en-CA", { timeZone: "Europe/Dublin" });
 
 function say(text, err = false) { const m = $("msg"); m.textContent = text || ""; m.className = err ? "err" : ""; }
 
+// ── drafts ────────────────────────────────────────────────────────────────
+// Unsaved typing lives in this browser's storage, so a refresh or a crash
+// doesn't lose it. Storage can be unavailable (private windows), so every
+// access is guarded and the page works without it.
+const store = {
+  get(k) { try { return JSON.parse(localStorage.getItem("timew." + k)); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem("timew." + k, JSON.stringify(v)); } catch {} },
+  del(k) { try { localStorage.removeItem("timew." + k); } catch {} },
+};
+const PAST = ["pDate", "pFrom", "pTo", "pTags", "pNote"];
+
+// ── requests ──────────────────────────────────────────────────────────────
+// One at a time, in order. Leaving the note box saves it, and the click that
+// caused the blur (say, Stop) must still happen, after the save.
+let queue = Promise.resolve();
+const enqueue = (fn) => (queue = queue.then(fn, fn));
+
 async function api(method, path, body) {
-  const res = await fetch(path, {
-    method, credentials: "same-origin",
-    headers: body ? { "Content-Type": "application/json" } : {},
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  let res;
+  try {
+    res = await fetch(path, {
+      method, credentials: "same-origin",
+      headers: body ? { "Content-Type": "application/json" } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch {
+    // An expired Access session redirects to another origin, which fetch
+    // reports as a network error, same as being offline.
+    throw new Error("Can't reach timew: offline, or the login expired. Reload the page.");
+  }
   const data = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
   if (!res.ok) { const e = new Error(data.error || `HTTP ${res.status}`); e.overlap = !!data.overlap; throw e; }
   return data;
 }
 
-async function act(method, path, body, done) {
-  document.querySelectorAll("button").forEach((b) => b.disabled = true);
-  try {
-    render(await api(method, path, body));
-    retry = null; say(done || "");
-    loadReport();
-  } catch (e) {
-    say(e.message, true);
-    // Overlaps have one standard fix: trim the neighbour with :adjust.
-    if (e.overlap && path === "/api/track" && !body.adjust) {
-      retry = () => act(method, path, { ...body, adjust: true }, done);
-      say(e.message + " — ", true);
-      const b = document.createElement("button"); b.textContent = "Retry and trim the other entry"; b.onclick = retry;
-      $("msg").append(b);
+function act(method, path, body, done) {
+  return enqueue(async () => {
+    try {
+      render(await api(method, path, body));
+      say(done || "");
+      loadReport();
+      return true;
+    } catch (e) {
+      say(e.message, true);
+      // Overlaps have one standard fix: trim the neighbour with :adjust.
+      if (e.overlap && path === "/api/track" && !body.adjust) {
+        const b = document.createElement("button"); b.textContent = "Retry and trim the other entry";
+        b.onclick = () => act(method, path, { ...body, adjust: true }, done).then((ok) => ok && clearPast());
+        $("msg").append(" ", b);
+      }
+      return false;
     }
-  } finally {
-    document.querySelectorAll("button").forEach((b) => b.disabled = false);
-  }
+  });
 }
 
+// ── note ──────────────────────────────────────────────────────────────────
+function noteKey() { return state?.running ? "note." + state.running.start : null; }
+
+function showNoteState() {
+  const r = state?.running, el = $("note");
+  const dirty = !!r && el.value !== (r.annotation || "");
+  el.classList.toggle("dirty", dirty);
+  $("noteHint").textContent = dirty ? "Unsaved: kept in this browser, saved when you leave the box" : (r?.annotation ? "Saved" : "");
+}
+
+function saveNote() {
+  const r = state?.running, key = noteKey();
+  if (!r) return;
+  const text = $("note").value;
+  if (text === (r.annotation || "")) { store.del(key); showNoteState(); return; }
+  act("POST", "/api/annotate", { start: r.start, text }, "Note saved").then((ok) => { if (ok) store.del(key); showNoteState(); });
+}
+
+$("note").addEventListener("input", () => { const k = noteKey(); if (k) store.set(k, $("note").value); showNoteState(); });
+$("note").addEventListener("blur", saveNote);
+$("note").addEventListener("keydown", (e) => { if (e.key === "Enter") $("note").blur(); });
+$("saveNote").onclick = saveNote;
+
+// ── render ────────────────────────────────────────────────────────────────
 function render(s) {
+  const was = state?.running?.start;
   state = s;
   const r = s.running;
   tickBase = r ? r.seconds : 0; tickAt = Date.now();
+
   $("runControls").innerHTML = "";
-  if (r) {
-    const stop = document.createElement("button"); stop.className = "primary"; stop.textContent = "Stop";
-    stop.onclick = () => act("POST", "/api/stop", {}, "Stopped");
-    $("runControls").append(stop);
-    if (document.activeElement !== $("note")) $("note").value = r.annotation || "";
-  } else {
-    const resume = document.createElement("button"); resume.textContent = "Resume last";
-    resume.onclick = () => act("POST", "/api/continue", {}, "Resumed");
-    $("runControls").append(resume);
-  }
-  $("noteRow").hidden = !r;
+  const b = document.createElement("button");
+  // A restored, unsaved draft is saved first: the queue keeps the order.
+  if (r) { b.className = "primary"; b.textContent = "Stop"; b.onclick = () => { saveNote(); act("POST", "/api/stop", {}, "Stopped"); }; }
+  else { b.textContent = "Resume last"; b.onclick = () => act("POST", "/api/continue", {}, "Resumed"); }
+  $("runControls").append(b);
+
+  $("noteBox").hidden = !r;
   $("startBox").hidden = !!r;
+  if (r && document.activeElement !== $("note")) {
+    const draft = store.get("note." + r.start);
+    $("note").value = draft ?? r.annotation ?? "";
+  }
+  if (was && was !== r?.start) store.del("note." + was);
+  showNoteState();
 
   $("chips").innerHTML = "";
   for (const tags of s.recent_tags) {
@@ -181,22 +244,34 @@ function render(s) {
     $("today").append(li);
   }
   tick();
+  badge();
+}
+
+// ── window title, icon and badge ────────────────────────────────────────────
+// What the taskbar shows once the page is installed as an app.
+function badge() {
+  const on = !!state?.running;
+  $("favicon").href = `/icon.png?size=64${on ? "&on=1" : ""}`;
+  try { on ? navigator.setAppBadge?.() : navigator.clearAppBadge?.(); } catch {}
 }
 
 function tick() {
   if (!state) return;
   const live = state.running ? tickBase + (Date.now() - tickAt) / 1000 : 0;
   const t = state.totals, extra = state.running ? live - tickBase : 0;
-  $("now").innerHTML = state.running
-    ? `<span class="tag"></span> ${hm(live)}`
-    : `<span class="muted">Stopped</span>`;
-  if (state.running) $("now").querySelector(".tag").textContent = label(state.running.tags);
+  if (state.running) {
+    $("now").innerHTML = `<span class="tag"></span> ${hm(live)}`;
+    $("now").querySelector(".tag").textContent = label(state.running.tags);
+    document.title = `▶ ${hm(live)} ${short(state.running.tags)} · timew`;
+  } else {
+    $("now").innerHTML = `<span class="muted">Stopped</span>`;
+    document.title = `timew · today ${hm(t.today)}`;
+  }
   $("totals").innerHTML = `<span>Today <b>${hm(t.today + extra)}</b></span><span>Week <b>${hm(t.week + extra)}</b></span><span>Month <b>${hm(t.month + extra)}</b></span>`;
   $("clock").textContent = new Date().toLocaleString("en-IE", { weekday: "short", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Dublin" });
 }
 
-const isoDay = (d) => d.toLocaleDateString("en-CA", { timeZone: "Europe/Dublin" });
-
+// ── week report ─────────────────────────────────────────────────────────────
 async function loadReport() {
   week = week || isoDay(new Date());
   try {
@@ -206,18 +281,20 @@ async function loadReport() {
     $("report").textContent = r.text || "Nothing tracked that week.";
   } catch (e) { $("report").textContent = e.message; }
 }
-
 function shiftWeek(days) { const d = new Date(week + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() + days); week = d.toISOString().slice(0, 10); loadReport(); }
+
+// ── past block ──────────────────────────────────────────────────────────────
+function clearPast() { ["pFrom", "pTo", "pNote"].forEach((id) => $(id).value = ""); store.del("past"); }
+for (const id of PAST) $(id).addEventListener("input", () => store.set("past", Object.fromEntries(PAST.map((k) => [k, $(k).value]))));
 
 $("start").onclick = () => {
   const tags = splitTags($("tags").value), at = $("at").value.trim();
-  act("POST", "/api/start", at ? { tags, at } : { tags }, "Started").then(() => { $("tags").value = ""; $("at").value = ""; });
+  act("POST", "/api/start", at ? { tags, at } : { tags }, "Started").then((ok) => { if (ok) { $("tags").value = ""; $("at").value = ""; } });
 };
-$("saveNote").onclick = () => state?.running && act("POST", "/api/annotate", { start: state.running.start, text: $("note").value }, "Note saved");
 $("pAdd").onclick = () => act("POST", "/api/track", {
   date: $("pDate").value, from: $("pFrom").value, to: $("pTo").value,
   tags: splitTags($("pTags").value), note: $("pNote").value,
-}, "Added").then(() => { if (!$("msg").classList.contains("err")) ["pFrom", "pTo", "pNote"].forEach((id) => $(id).value = ""); });
+}, "Added").then((ok) => ok && clearPast());
 $("wPrev").onclick = () => shiftWeek(-7);
 $("wNext").onclick = () => shiftWeek(7);
 $("wCopy").onclick = async () => {
@@ -226,11 +303,14 @@ $("wCopy").onclick = async () => {
 };
 
 async function refresh() { try { render(await api("GET", "/api/status")); } catch (e) { say(e.message, true); } }
+
+const past = store.get("past");
 $("pDate").value = isoDay(new Date());
+if (past) for (const id of PAST) if (past[id]) $(id).value = past[id];
 refresh(); loadReport();
 setInterval(tick, 1000);
-setInterval(refresh, 30000);
-document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+setInterval(() => { if (document.activeElement !== $("note")) enqueue(refresh); }, 30000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) enqueue(refresh); });
 </script>
 </body>
 </html>
